@@ -2,6 +2,9 @@
 
 Este proyecto es un procesador de pagos simple hecho en Rust. No persiste nada en base de datos, todo el estado se mantiene en memoria. Sirve para testear flujos de creación de clientes, acreditación, débito, consulta y "cierre" de balances.
 
+## Repositorio
+Repositorio [payment_engine](https://github.com/pythonfortinero/payment_engine.git)
+
 ## Stack
 
 - **Rust 1.88**
