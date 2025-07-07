@@ -1,0 +1,118 @@
+{
+    "info": {
+      "name": "Payment Engine",
+      "description": "Colección de endpoints para el mini procesador de pagos.",
+      "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+    },
+    "item": [
+      {
+        "name": "Crear cliente",
+        "request": {
+          "method": "POST",
+          "header": [
+            {
+              "key": "Content-Type",
+              "value": "application/json"
+            }
+          ],
+          "body": {
+            "mode": "raw",
+            "raw": "{\n  \"client_name\": \"Alice\",\n  \"birth_date\": \"1990-02-15\",\n  \"document_number\": \"12345678\",\n  \"country\": \"AR\"\n}"
+          },
+          "url": {
+            "raw": "http://localhost:8080/new_client",
+            "protocol": "http",
+            "host": ["localhost"],
+            "port": "8080",
+            "path": ["new_client"]
+          }
+        },
+        "response": []
+      },
+      {
+        "name": "Acreditar saldo",
+        "request": {
+          "method": "POST",
+          "header": [
+            {
+              "key": "Content-Type",
+              "value": "application/json"
+            }
+          ],
+          "body": {
+            "mode": "raw",
+            "raw": "{\n  \"client_id\": \"{{client_id}}\",\n  \"credit_amount\": \"1000.00\"\n}"
+          },
+          "url": {
+            "raw": "http://localhost:8080/new_credit_transaction",
+            "protocol": "http",
+            "host": ["localhost"],
+            "port": "8080",
+            "path": ["new_credit_transaction"]
+          }
+        },
+        "response": []
+      },
+      {
+        "name": "Debitar saldo",
+        "request": {
+          "method": "POST",
+          "header": [
+            {
+              "key": "Content-Type",
+              "value": "application/json"
+            }
+          ],
+          "body": {
+            "mode": "raw",
+            "raw": "{\n  \"client_id\": \"{{client_id}}\",\n  \"debit_amount\": \"130.00\"\n}"
+          },
+          "url": {
+            "raw": "http://localhost:8080/new_debit_transaction",
+            "protocol": "http",
+            "host": ["localhost"],
+            "port": "8080",
+            "path": ["new_debit_transaction"]
+          }
+        },
+        "response": []
+      },
+      {
+        "name": "Consultar saldo",
+        "request": {
+          "method": "GET",
+          "header": [],
+          "url": {
+            "raw": "http://localhost:8080/client_balance/{{client_id}}",
+            "protocol": "http",
+            "host": ["localhost"],
+            "port": "8080",
+            "path": ["client_balance", "{{client_id}}"]
+          }
+        },
+        "response": []
+      },
+      {
+        "name": "Persistir balances",
+        "request": {
+          "method": "POST",
+          "header": [],
+          "url": {
+            "raw": "http://localhost:8080/store_balances",
+            "protocol": "http",
+            "host": ["localhost"],
+            "port": "8080",
+            "path": ["store_balances"]
+          }
+        },
+        "response": []
+      }
+    ],
+    "variable": [
+      {
+        "key": "client_id",
+        "value": "REEMPLAZAR_LUEGO"
+      }
+    ]
+  }
+  
