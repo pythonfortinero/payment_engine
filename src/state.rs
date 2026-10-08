@@ -1,20 +1,20 @@
-use crate::models::Client;
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use uuid::Uuid;
+use crate::{events::TransactionCommitted, metrics::Metrics};
+use sqlx::PgPool;
+use tokio::sync::mpsc;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub clients: Arc<Mutex<HashMap<Uuid, Client>>>,
-    pub file_counter: Arc<Mutex<u32>>,
+    pub pool: PgPool,
+    pub events: mpsc::Sender<TransactionCommitted>,
+    pub metrics: Metrics,
 }
 
 impl AppState {
-    pub fn new() -> Self {
+    pub fn new(pool: PgPool, events: mpsc::Sender<TransactionCommitted>, metrics: Metrics) -> Self {
         Self {
-            clients: Arc::new(Mutex::new(HashMap::new())),
-            file_counter: Arc::new(Mutex::new(0)),
+            pool,
+            events,
+            metrics,
         }
     }
 }

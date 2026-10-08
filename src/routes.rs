@@ -1,129 +1,206 @@
-use actix_web::{web, HttpResponse, Responder, Result};
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, web};
 use rust_decimal::Decimal;
 use uuid::Uuid;
 
 use crate::{
-    models::{Client, CreditRequest, DebitRequest, NewClientRequest},
+    error::ApiError,
+    events::TransactionCommitted,
+    models::{CreditRequest, DebitRequest, NewClientRequest, NewTransaction, TransactionKind},
+    repository,
     state::AppState,
-    storage,
 };
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
-    cfg.service(
-        web::scope("")
-            .route("/new_client", web::post().to(new_client))
-            .route("/new_credit_transaction", web::post().to(new_credit))
-            .route("/new_debit_transaction", web::post().to(new_debit))
-            .route("/client_balance/{client_id}", web::get().to(client_balance))
-            .route("/store_balances", web::post().to(store_balances)),
-    );
+    cfg.route("/health", web::get().to(health))
+        .route("/ready", web::get().to(ready))
+        .route("/metrics", web::get().to(metrics))
+        .route("/new_client", web::post().to(new_client))
+        .route("/new_credit_transaction", web::post().to(new_credit))
+        .route("/new_debit_transaction", web::post().to(new_debit))
+        .route("/client_balance/{client_id}", web::get().to(client_balance))
+        .default_service(web::route().to(not_found_route));
+}
+
+async fn not_found_route(req: HttpRequest) -> Result<HttpResponse, ApiError> {
+    Err(correlated(
+        ApiError::new(
+            actix_web::http::StatusCode::NOT_FOUND,
+            "route_not_found",
+            "Route not found",
+        ),
+        &req,
+    ))
+}
+
+async fn health() -> HttpResponse {
+    HttpResponse::Ok().json(serde_json::json!({"status": "healthy"}))
+}
+
+async fn ready(data: web::Data<AppState>) -> HttpResponse {
+    if repository::is_ready(&data.pool).await {
+        HttpResponse::Ok().json(serde_json::json!({"status": "ready"}))
+    } else {
+        HttpResponse::ServiceUnavailable().json(serde_json::json!({"status": "not_ready"}))
+    }
+}
+
+async fn metrics(data: web::Data<AppState>) -> Result<HttpResponse, ApiError> {
+    let body = data.metrics.encode().map_err(|error| {
+        tracing::error!(%error, "failed to encode metrics");
+        ApiError::internal("Could not encode metrics")
+    })?;
+    Ok(HttpResponse::Ok()
+        .content_type("text/plain; version=0.0.4; charset=utf-8")
+        .body(body))
 }
 
 async fn new_client(
+    req: HttpRequest,
     data: web::Data<AppState>,
     payload: web::Json<NewClientRequest>,
-) -> impl Responder {
-    let mut clients = data.clients.lock().await;
-
-    if clients
-        .values()
-        .any(|c| c.document_number == payload.document_number)
-    {
-        return HttpResponse::BadRequest().body("Document number already exists");
-    }
-
-    let client = Client {
-        id: Uuid::new_v4(),
-        client_name: payload.client_name.clone(),
-        birth_date: payload.birth_date,
-        document_number: payload.document_number.clone(),
-        country: payload.country.clone(),
-        balance: Decimal::ZERO,
-    };
-
-    clients.insert(client.id, client.clone());
-
-    HttpResponse::Ok().json(client)
+) -> Result<HttpResponse, ApiError> {
+    validate_client(&payload).map_err(|error| correlated(error, &req))?;
+    repository::create_client(&data.pool, &payload)
+        .await
+        .map(|client| HttpResponse::Created().json(client))
+        .map_err(|error| correlated(error, &req))
 }
 
 async fn new_credit(
+    req: HttpRequest,
     data: web::Data<AppState>,
     payload: web::Json<CreditRequest>,
-) -> impl Responder {
-    adjust_balance(
-        data,
+) -> Result<HttpResponse, ApiError> {
+    transact(
+        &req,
+        &data,
         payload.client_id,
         payload.credit_amount,
-        true,
+        TransactionKind::Credit,
     )
     .await
 }
 
 async fn new_debit(
+    req: HttpRequest,
     data: web::Data<AppState>,
     payload: web::Json<DebitRequest>,
-) -> impl Responder {
-    adjust_balance(
-        data,
+) -> Result<HttpResponse, ApiError> {
+    transact(
+        &req,
+        &data,
         payload.client_id,
         payload.debit_amount,
-        false
+        TransactionKind::Debit,
     )
     .await
 }
 
-async fn adjust_balance(
-    data: web::Data<AppState>,
+async fn transact(
+    req: &HttpRequest,
+    data: &web::Data<AppState>,
     client_id: Uuid,
     amount: Decimal,
-    is_credit: bool,
-) -> HttpResponse {
-    let mut clients = data.clients.lock().await;
-
-    let client = match clients.get_mut(&client_id) {
-        Some(c) => c,
-        None => return HttpResponse::NotFound().body("Client not found"),
-    };
-
-    if is_credit {
-        client.balance += amount;
-    } else {
-        if client.balance < amount {
-            return HttpResponse::BadRequest().body("Insufficient funds");
+    kind: TransactionKind,
+) -> Result<HttpResponse, ApiError> {
+    validate_amount(amount).map_err(|error| correlated(error, req))?;
+    let key = idempotency_key(req).map_err(|error| correlated(error, req))?;
+    let result = repository::create_transaction(
+        &data.pool,
+        NewTransaction {
+            client_id,
+            kind,
+            amount,
+            idempotency_key: &key,
+        },
+    )
+    .await
+    .map_err(|error| correlated(error, req))?;
+    data.metrics.transaction(kind.as_str(), result.replayed);
+    if !result.replayed {
+        let event = TransactionCommitted {
+            transaction_id: result.transaction.id,
+            client_id,
+            kind,
+            amount,
+        };
+        if let Err(error) = data.events.try_send(event) {
+            data.metrics.event("dropped");
+            tracing::warn!(%error, "event queue unavailable; transaction remains committed");
         }
-        client.balance -= amount;
     }
-
-    HttpResponse::Ok().json(client.balance)
+    Ok(HttpResponse::Ok().json(result))
 }
 
 async fn client_balance(
+    req: HttpRequest,
     data: web::Data<AppState>,
     path: web::Path<Uuid>,
-) -> impl Responder {
-    let clients = data.clients.lock().await;
-    let client_id = path.into_inner();
+) -> Result<HttpResponse, ApiError> {
+    repository::get_balance(&data.pool, path.into_inner())
+        .await
+        .map(|balance| HttpResponse::Ok().json(balance))
+        .map_err(|error| correlated(error, &req))
+}
 
-    if let Some(client) = clients.get(&client_id) {
-        HttpResponse::Ok().json(client)
+fn validate_amount(amount: Decimal) -> Result<(), ApiError> {
+    if amount <= Decimal::ZERO {
+        Err(ApiError::bad_request(
+            "invalid_amount",
+            "Amount must be greater than zero",
+        ))
     } else {
-        HttpResponse::NotFound().body("Client not found")
+        Ok(())
     }
 }
 
-async fn store_balances(data: web::Data<AppState>) -> Result<impl Responder> {
-    let mut clients = data.clients.lock().await;
-    let mut counter = data.file_counter.lock().await;
-
-    let filename = storage::persist(&clients, *counter).await.map_err(|e| {
-        actix_web::error::ErrorInternalServerError(format!("Persist failed: {e}"))
-    })?;
-
-    *counter += 1;
-
-    for client in clients.values_mut() {
-        client.balance = Decimal::ZERO;
+fn validate_client(request: &NewClientRequest) -> Result<(), ApiError> {
+    if request.client_name.trim().is_empty() || request.document_number.trim().is_empty() {
+        return Err(ApiError::bad_request(
+            "invalid_client",
+            "Client name and document number are required",
+        ));
     }
+    if request.country.trim().len() != 2 {
+        return Err(ApiError::bad_request(
+            "invalid_country",
+            "Country must be a two-letter code",
+        ));
+    }
+    Ok(())
+}
 
-    Ok(HttpResponse::Ok().body(format!("Balances stored in {filename}")))
+fn idempotency_key(req: &HttpRequest) -> Result<String, ApiError> {
+    let value = req
+        .headers()
+        .get("idempotency-key")
+        .ok_or_else(|| {
+            ApiError::bad_request(
+                "missing_idempotency_key",
+                "Idempotency-Key header is required",
+            )
+        })?
+        .to_str()
+        .map_err(|_| {
+            ApiError::bad_request(
+                "invalid_idempotency_key",
+                "Idempotency-Key must be valid ASCII",
+            )
+        })?;
+    if value.trim().is_empty() || value.len() > 128 || value.chars().any(char::is_control) {
+        return Err(ApiError::bad_request(
+            "invalid_idempotency_key",
+            "Idempotency-Key must contain 1 to 128 printable characters",
+        ));
+    }
+    Ok(value.to_owned())
+}
+
+fn correlated(error: ApiError, req: &HttpRequest) -> ApiError {
+    let id = req
+        .extensions()
+        .get::<String>()
+        .cloned()
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
+    error.with_correlation_id(id)
 }
