@@ -1,0 +1,5 @@
+[advisories]
+# Cargo.lock records SQLx's optional MySQL driver even though default features are disabled.
+# `cargo tree -i rsa` is empty for every built target; the PostgreSQL-only binary does not
+# compile or ship RSA. Keep auditing this explicit exception until SQLx removes the optional lock entry.
+ignore = ["RUSTSEC-2023-0071"]
